@@ -1,0 +1,34 @@
+[package]
+name = "esp32-xvc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "esp32-xvc-server"
+path = "src/esp32_xvc_server.rs"
+test = false
+bench = false
+
+[features]
+default = ["esp32"]
+esp32 = []
+xvc-log = []
+
+[dependencies]
+esp-alloc = { version = "0.9.0", features = ["esp32"] }
+esp-bootloader-esp-idf = { version = "0.4.0", features = ["esp32"] }
+esp-hal = { version = "1.0.0", features = ["esp32", "unstable"] }
+esp-println = { version = "0.16.0", default-features = false, features = ["critical-section", "esp32", "uart"] }
+esp-radio = { version = "0.17.0", features = ["esp32", "smoltcp", "unstable", "wifi"] }
+esp-rtos = { version = "0.2.0", features = ["esp32", "esp-alloc", "esp-radio"] }
+smoltcp = { version = "0.12.0", default-features = false, features = ["medium-ethernet", "proto-ipv4", "socket-tcp"] }
+static_cell = "2.1.1"
+
+[profile.dev]
+opt-level = "s"
+
+[profile.release]
+codegen-units = 1
+lto = "fat"
+opt-level = 3

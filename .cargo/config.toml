@@ -1,0 +1,21 @@
+[build]
+target = "xtensa-esp32-none-elf"
+rustflags = [
+    "-C",
+    "link-arg=-Tlinkall.x",
+]
+
+[target.xtensa-esp32-none-elf]
+runner = "espflash flash --monitor"
+
+[unstable]
+build-std = ["alloc", "core"]
+
+[env]
+# Safe defaults keep a clean checkout buildable. Environment variables supplied
+# by the shell take precedence; never put real credentials in this file.
+WIFI_SSID = { value = "CHANGE_ME", force = false }
+WIFI_PASSWORD = { value = "CHANGE_ME", force = false }
+STATIC_IP = { value = "192.168.1.100", force = false }
+GATEWAY_IP = { value = "192.168.1.1", force = false }
+
