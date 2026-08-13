@@ -9,7 +9,6 @@ extern crate alloc;
 mod app;
 mod config;
 mod jtag;
-#[macro_use]
 mod logging;
 mod network;
 mod runtime;
@@ -19,7 +18,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[esp_hal::main]
 fn main() -> ! {
-    let hal_config =
-        esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
+    let hal_config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
     app::run(esp_hal::init(hal_config))
 }

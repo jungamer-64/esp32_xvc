@@ -13,6 +13,7 @@ bench = false
 [features]
 default = ["esp32"]
 esp32 = []
+tdo-diagnostic = []
 xvc-log = []
 
 [dependencies]
