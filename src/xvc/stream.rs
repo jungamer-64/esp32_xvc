@@ -9,8 +9,19 @@
 //! incremental TDO delivery plus Core0/Core1 cancellation safety.
 
 use alloc::vec::Vec;
+use core::cell::Cell;
 
-use crate::jtag::bytes_for_bits;
+use embassy_futures::join::join;
+use embassy_net::tcp::TcpSocket;
+use embassy_time::{Duration, Instant};
+use esp_println::println;
+
+use crate::{
+    jtag::{JtagService, JtagShift, ShiftExecution, bytes_for_bits},
+    logging::xvc_log,
+};
+
+use super::{ReceiveWindow, TransportError, read_progress, write_all};
 
 pub(super) const ABSOLUTE_MAX_BITS: usize = 2_097_152;
 const RAW_TMS_MAX_BYTES: usize = 24 * 1_024;
@@ -18,18 +29,24 @@ const GETINFO_MAX_BITS: usize = RAW_TMS_MAX_BYTES * 8;
 const CHUNK_BITS: usize = 2_048;
 const CHUNK_BYTES: usize = bytes_for_bits(CHUNK_BITS);
 const MAX_RLE_RUNS: usize = 1_024;
+const STREAM_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
 
 const _: () = assert!(GETINFO_MAX_BITS == 196_608);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum StreamError {
-    Disconnected,
+    Transport(TransportError),
     JtagFailed,
-    Timeout,
     ShiftTooLarge,
     TmsRleOverflow,
     TmsUnderflow,
     OutOfMemory,
+}
+
+impl From<TransportError> for StreamError {
+    fn from(error: TransportError) -> Self {
+        Self::Transport(error)
+    }
 }
 
 struct TmsRle {
@@ -231,6 +248,160 @@ impl StreamWorkspace {
             tdo_buffers: [[0; CHUNK_BYTES]; 2],
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct PendingTdo {
+    slot: Slot,
+    length: usize,
+}
+
+pub(super) async fn execute(
+    bit_count: usize,
+    receive: &mut ReceiveWindow,
+    socket: &mut TcpSocket<'_>,
+    jtag: &mut JtagService,
+    workspace: &mut StreamWorkspace,
+) -> Result<(), StreamError> {
+    if bit_count > ABSOLUTE_MAX_BITS {
+        println!("Shift too large: {bit_count} bits (max {ABSOLUTE_MAX_BITS})");
+        return Err(StreamError::ShiftTooLarge);
+    }
+
+    let byte_count = bytes_for_bits(bit_count);
+    let started_at = Instant::now();
+    xvc_log!("Stream start: {bit_count} bits ({byte_count} bytes)");
+    workspace.tms_storage.begin(byte_count);
+
+    let mut tms_tail = [0_u8; 4];
+    let mut tms_seen = 0_usize;
+    let mut remaining = byte_count;
+    while remaining > 0 {
+        let chunk_len = remaining.min(CHUNK_BYTES);
+        read_exact_mix(&mut workspace.tms_chunk[..chunk_len], receive, socket).await?;
+
+        for &byte in &workspace.tms_chunk[..chunk_len] {
+            if tms_seen < tms_tail.len() {
+                tms_tail[tms_seen] = byte;
+            } else {
+                tms_tail.rotate_left(1);
+                tms_tail[3] = byte;
+            }
+            tms_seen += 1;
+        }
+        workspace
+            .tms_storage
+            .store(&mut workspace.raw_tms, &workspace.tms_chunk[..chunk_len])?;
+        remaining -= chunk_len;
+    }
+    workspace.tms_storage.rewind();
+
+    let tail_len = byte_count.min(tms_tail.len());
+    match workspace.tms_storage.description() {
+        StorageDescription::Raw { length } => xvc_log!(
+            "Stream: {bit_count} bits, static RAW mode ({length} bytes), TMS tail={:02x?}",
+            &tms_tail[..tail_len]
+        ),
+        StorageDescription::Rle { runs } => xvc_log!(
+            "Stream: {bit_count} bits, {runs} RLE runs, TMS tail={:02x?}",
+            &tms_tail[..tail_len]
+        ),
+    }
+
+    let mut bits_remaining = bit_count;
+    let mut total_processed = 0_usize;
+    let mut pending: Option<PendingTdo> = None;
+    let mut fill_slot = Slot::First;
+
+    while bits_remaining > 0 {
+        let chunk_bits = bits_remaining.min(CHUNK_BITS);
+        let chunk_bytes = bytes_for_bits(chunk_bits);
+        workspace
+            .tms_storage
+            .read_into(&workspace.raw_tms, &mut workspace.tms_chunk[..chunk_bytes])?;
+        read_exact_mix(&mut workspace.tdi_chunk[..chunk_bytes], receive, socket).await?;
+
+        let (current_tdo, previous_tdo) = split_tdo_buffers(&mut workspace.tdo_buffers, fill_slot);
+        let shift = JtagShift::new(
+            ShiftExecution::StreamChunk,
+            chunk_bits,
+            &workspace.tms_chunk[..chunk_bytes],
+            &workspace.tdi_chunk[..chunk_bytes],
+            &mut current_tdo[..chunk_bytes],
+        )
+        .map_err(|_| StreamError::JtagFailed)?;
+
+        if let Some(previous) = pending {
+            debug_assert!(previous.slot == fill_slot.other());
+            let alive = Cell::new(socket.may_recv() && socket.may_send());
+            let shift_future = jtag.shift(shift, || alive.get());
+            let send_future = send_with_liveness(socket, &previous_tdo[..previous.length], &alive);
+            let (shift_result, send_result) = join(shift_future, send_future).await;
+            send_result?;
+            shift_result.map_err(|_| StreamError::JtagFailed)?;
+        } else {
+            jtag.shift(shift, || socket.may_recv() && socket.may_send())
+                .await
+                .map_err(|_| StreamError::JtagFailed)?;
+        }
+
+        pending = Some(PendingTdo {
+            slot: fill_slot,
+            length: chunk_bytes,
+        });
+        fill_slot = fill_slot.other();
+        bits_remaining -= chunk_bits;
+        total_processed += chunk_bits;
+        if total_processed % 65_536 < CHUNK_BITS {
+            xvc_log!("Stream: {total_processed}/{bit_count} bits");
+        }
+    }
+
+    if let Some(final_tdo) = pending {
+        write_all(
+            socket,
+            &workspace.tdo_buffers[final_tdo.slot.index()][..final_tdo.length],
+            STREAM_PROGRESS_TIMEOUT,
+        )
+        .await?;
+    }
+
+    let elapsed_ms = started_at.elapsed().as_millis();
+    let bits_per_second = if elapsed_ms > 0 {
+        (bit_count as u64).saturating_mul(1_000) / elapsed_ms
+    } else {
+        0
+    };
+    xvc_log!(
+        "Stream complete: {bit_count} bits in {elapsed_ms}ms ({} kbit/s, TCK={}ns)",
+        bits_per_second / 1_000,
+        jtag.period_ns()
+    );
+    Ok(())
+}
+
+async fn read_exact_mix(
+    output: &mut [u8],
+    receive: &mut ReceiveWindow,
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), StreamError> {
+    let mut received = receive.take_into(output);
+    while received < output.len() {
+        received += read_progress(socket, &mut output[received..]).await?;
+    }
+    Ok(())
+}
+
+async fn send_with_liveness(
+    socket: &mut TcpSocket<'_>,
+    data: &[u8],
+    alive: &Cell<bool>,
+) -> Result<(), StreamError> {
+    let result = write_all(socket, data, STREAM_PROGRESS_TIMEOUT).await;
+    if result.is_err() {
+        alive.set(false);
+    }
+    result.map_err(StreamError::from)
 }
 
 fn split_tdo_buffers(
