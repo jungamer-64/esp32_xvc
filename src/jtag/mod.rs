@@ -1,19 +1,26 @@
-//! JTAG hardware ownership and synchronous Core1 execution service.
+//! JTAG hardware ownership and asynchronous Core1 execution service.
 
 mod ipc;
 mod worker;
 
+use embassy_time::{Duration, Instant, with_timeout};
 use esp_hal::{
     gpio::{Input, InputConfig, Level, Output, OutputConfig, Pull},
-    interrupt::software::SoftwareInterruptControl,
-    peripherals::{CPU_CTRL, GPIO18, GPIO19, GPIO23, GPIO34, SW_INTERRUPT},
+    interrupt::software::SoftwareInterrupt,
+    peripherals::{CPU_CTRL, GPIO18, GPIO19, GPIO23, GPIO34},
     system::Stack,
 };
 use esp_println::println;
 use static_cell::ConstStaticCell;
 
+use crate::logging::xvc_log;
+
 pub(crate) const MIN_TCK_PERIOD_US: u32 = 1;
 pub(crate) const MAX_TCK_PERIOD_US: u32 = 1_000;
+
+const RESET_TIMEOUT: Duration = Duration::from_secs(2);
+const HARD_TIMEOUT_GRACE: Duration = Duration::from_secs(2);
+const COMPLETION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 pub(crate) const fn bytes_for_bits(bit_count: usize) -> usize {
     bit_count.div_ceil(8)
@@ -94,7 +101,7 @@ pub(crate) struct JtagHardware {
     pub(crate) tdi: GPIO19<'static>,
     pub(crate) tdo: GPIO34<'static>,
     pub(crate) cpu_control: CPU_CTRL<'static>,
-    pub(crate) software_interrupt: SW_INTERRUPT<'static>,
+    pub(crate) software_interrupt: SoftwareInterrupt<'static, 1>,
 }
 
 impl JtagService {
@@ -120,14 +127,9 @@ impl JtagService {
 
         static CORE1_STACK: ConstStaticCell<Stack<16_384>> = ConstStaticCell::new(Stack::new());
         let core1_stack = CORE1_STACK.take();
-        let interrupts = SoftwareInterruptControl::new(software_interrupt);
-        esp_rtos::start_second_core(
-            cpu_control,
-            interrupts.software_interrupt0,
-            interrupts.software_interrupt1,
-            core1_stack,
-            || worker::run(),
-        );
+        esp_rtos::start_second_core(cpu_control, software_interrupt, core1_stack, || {
+            worker::run()
+        });
 
         println!("[Core0] XVC Server (Atomic IPC)");
         Self {
@@ -158,6 +160,96 @@ impl JtagService {
         self.tck_period_us.saturating_mul(1_000)
     }
 
+    pub(crate) async fn reset<F>(&mut self, is_alive: F) -> Result<(), JtagError>
+    where
+        F: FnMut() -> bool,
+    {
+        let command = ipc::publish_reset(self.tck_period_us).map_err(map_publish_error)?;
+        wait_for_command(command, RESET_TIMEOUT, is_alive, "RESET").await
+    }
+
+    pub(crate) async fn shift<F>(
+        &mut self,
+        shift: JtagShift<'_>,
+        is_alive: F,
+    ) -> Result<(), JtagError>
+    where
+        F: FnMut() -> bool,
+    {
+        let expected_ms = (shift.bit_count as u64)
+            .saturating_mul(self.tck_period_us as u64)
+            .div_ceil(1_000);
+        let soft_timeout = Duration::from_millis(
+            expected_ms
+                .saturating_mul(shift.execution.timeout_multiplier())
+                .saturating_add(200),
+        );
+        let command = ipc::publish_shift(
+            self.tck_period_us,
+            shift.bit_count,
+            shift.tms.as_ptr(),
+            shift.tdi.as_ptr(),
+            shift.tdo.as_mut_ptr(),
+        )
+        .map_err(map_publish_error)?;
+
+        wait_for_command(command, soft_timeout, is_alive, "SHIFT").await?;
+        if !shift.bit_count.is_multiple_of(8) {
+            let final_byte = shift.tdo.len() - 1;
+            shift.tdo[final_byte] &= (1 << (shift.bit_count % 8)) - 1;
+        }
+        Ok(())
+    }
+}
+
+async fn wait_for_command<F>(
+    command: ipc::ActiveCommand,
+    soft_timeout: Duration,
+    mut is_alive: F,
+    operation: &str,
+) -> Result<(), JtagError>
+where
+    F: FnMut() -> bool,
+{
+    let soft_deadline = Instant::now() + soft_timeout;
+    let hard_deadline = soft_deadline + HARD_TIMEOUT_GRACE;
+    let mut abort_requested = false;
+
+    while !command.is_complete() {
+        if !is_alive() && !abort_requested {
+            ipc::request_abort();
+            abort_requested = true;
+        }
+
+        let now = Instant::now();
+        if now >= soft_deadline && !abort_requested {
+            xvc_log!("Core1 {operation} timeout, aborting");
+            ipc::request_abort();
+            abort_requested = true;
+        }
+        if now >= hard_deadline {
+            println!("CRITICAL: Core1 stuck ({operation})");
+            esp_hal::system::software_reset();
+        }
+
+        let _ = with_timeout(COMPLETION_POLL_INTERVAL, command.wait_for_completion()).await;
+    }
+
+    if command.finish() {
+        Ok(())
+    } else {
+        Err(JtagError::WorkerFailed)
+    }
+}
+
+fn map_publish_error(error: ipc::PublishError) -> JtagError {
+    match error {
+        ipc::PublishError::Busy => JtagError::Busy,
+        ipc::PublishError::WorkerCommandOccupied => {
+            println!("FATAL: Core1 command was not consumed");
+            esp_hal::system::software_reset()
+        }
+    }
 }
 
 fn configure_tdo_input() {

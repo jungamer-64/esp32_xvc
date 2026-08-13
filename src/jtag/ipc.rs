@@ -2,6 +2,11 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use esp_hal::time::{Duration, Instant};
+use esp_println::println;
+use esp_rtos::CurrentThreadHandle;
+
 const COMMAND_NONE: u32 = 0;
 const COMMAND_SHIFT: u32 = 1;
 const COMMAND_RESET: u32 = 2;
@@ -44,6 +49,7 @@ impl Mailbox {
 }
 
 static MAILBOX: Mailbox = Mailbox::new();
+static COMPLETION: Signal<CriticalSectionRawMutex, u32> = Signal::new();
 
 /// Zero means idle. A non-zero value identifies the command that owns all
 /// buffers currently visible to Core1.
@@ -57,6 +63,7 @@ pub(super) enum PublishError {
 
 pub(super) struct ActiveCommand {
     sequence: u32,
+    in_flight: bool,
 }
 
 impl ActiveCommand {
@@ -64,14 +71,54 @@ impl ActiveCommand {
         MAILBOX.completed_sequence.load(Ordering::Acquire) == self.sequence
     }
 
-    pub(super) fn succeeded(&self) -> bool {
+    fn succeeded(&self) -> bool {
         MAILBOX.state.load(Ordering::Acquire) == STATE_DONE
+    }
+
+    pub(super) async fn wait_for_completion(&self) {
+        while !self.is_complete() {
+            let completed_sequence = COMPLETION.wait().await;
+            if completed_sequence == self.sequence {
+                break;
+            }
+        }
+    }
+
+    pub(super) fn finish(mut self) -> bool {
+        debug_assert!(self.is_complete());
+        let succeeded = self.succeeded();
+        self.release();
+        self.in_flight = false;
+        succeeded
+    }
+
+    fn release(&self) {
+        clear_abort();
+        let released =
+            ACTIVE_SEQUENCE.compare_exchange(self.sequence, 0, Ordering::AcqRel, Ordering::Acquire);
+        debug_assert!(released.is_ok());
     }
 }
 
 impl Drop for ActiveCommand {
     fn drop(&mut self) {
-        ACTIVE_SEQUENCE.store(0, Ordering::Release);
+        if !self.in_flight {
+            return;
+        }
+
+        request_abort();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !self.is_complete() {
+            if Instant::now() >= deadline {
+                println!(
+                    "CRITICAL: Core1 stuck while cancelling sequence {}",
+                    self.sequence
+                );
+                esp_hal::system::software_reset();
+            }
+            CurrentThreadHandle::get().delay(Duration::ZERO);
+        }
+        self.release();
     }
 }
 
@@ -150,7 +197,11 @@ fn publish(
         return Err(PublishError::WorkerCommandOccupied);
     }
 
-    Ok(ActiveCommand { sequence })
+    COMPLETION.reset();
+    Ok(ActiveCommand {
+        sequence,
+        in_flight: true,
+    })
 }
 
 fn next_sequence() -> u32 {
@@ -173,15 +224,6 @@ pub(super) fn clear_abort() {
 
 pub(super) fn abort_requested() -> bool {
     MAILBOX.abort.load(Ordering::Acquire)
-}
-
-pub(super) fn active_sequence() -> Option<u32> {
-    let sequence = ACTIVE_SEQUENCE.load(Ordering::Acquire);
-    (sequence != 0).then_some(sequence)
-}
-
-pub(super) fn sequence_completed(sequence: u32) -> bool {
-    MAILBOX.completed_sequence.load(Ordering::Acquire) == sequence
 }
 
 pub(super) fn take_worker_command() -> Option<WorkerCommand> {
@@ -218,4 +260,5 @@ pub(super) fn complete(sequence: u32, succeeded: bool) {
     MAILBOX
         .completed_sequence
         .store(sequence, Ordering::Release);
+    COMPLETION.signal(sequence);
 }

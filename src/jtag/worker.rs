@@ -1,8 +1,8 @@
 //! Core1 JTAG bit-banging worker.
 
+use esp_hal::{rom::ets_delay_us, time::Duration};
 use esp_println::println;
-
-use crate::runtime::{cooperative_delay_us, delay_ms, yield_now};
+use esp_rtos::CurrentThreadHandle;
 
 use super::{bytes_for_bits, ipc};
 
@@ -53,6 +53,30 @@ pub(super) fn run() -> ! {
                 ipc::complete(sequence, false);
             }
         }
+    }
+}
+
+#[inline]
+fn delay_ms(milliseconds: u64) {
+    CurrentThreadHandle::get().delay(Duration::from_millis(milliseconds));
+}
+
+#[inline]
+fn yield_now() {
+    CurrentThreadHandle::get().delay(Duration::ZERO);
+}
+
+#[inline]
+fn cooperative_delay_us(mut microseconds: u32) {
+    if microseconds >= 2_000 {
+        while microseconds > 0 {
+            let chunk = microseconds.min(250);
+            ets_delay_us(chunk);
+            microseconds -= chunk;
+            yield_now();
+        }
+    } else if microseconds > 0 {
+        ets_delay_us(microseconds);
     }
 }
 
