@@ -3,6 +3,14 @@
 Bare-metal Xilinx Virtual Cable (XVC) server for the original dual-core ESP32.
 It exposes the ESP32 JTAG pins over TCP port 2542 through Wi-Fi.
 
+> [!CAUTION]
+> **DO NOT REMOVE LARGE-SHIFT STREAMING OR REPLACE IT WITH A FIXED-BUFFER-ONLY
+> IMPLEMENTATION.** Vivado may ignore the shift limit reported by `getinfo:`
+> and send a request larger than the normal XVC receive buffer. Large-shift
+> streaming is mandatory protocol behavior: it must retain or reconstruct TMS,
+> execute JTAG incrementally with bounded RAM, return TDO incrementally, and
+> preserve timeout, disconnect, abort, and Core0/Core1 synchronization behavior.
+
 ## Architecture
 
 - `main` is only the firmware entrypoint; `app` composes the subsystems.
@@ -85,6 +93,3 @@ cargo run --release --features tdo-diagnostic
 
 After the firmware reports that the server is ready, connect Vivado to
 `TCP:<STATIC_IP>:2542`.
-
-Large-shift streaming is required for Vivado compatibility. It is a core
-protocol behavior, not an optional optimization.

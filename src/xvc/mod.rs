@@ -1,8 +1,15 @@
 //! XVC TCP session, wire protocol, and shift orchestration.
 //!
-//! Vivado can ignore the `getinfo:` shift-size advertisement. Every shift
-//! larger than the normal receive buffer must therefore remain on the bounded
-//! two-pass streaming path in `stream`.
+//! # CRITICAL: LARGE-SHIFT STREAMING MUST NOT BE REMOVED
+//!
+//! Vivado can ignore the `getinfo:` shift-size advertisement and send a shift
+//! larger than the normal receive buffer. A fixed-buffer-only implementation
+//! is therefore not Vivado compatible. Every oversized shift must remain on
+//! `stream` or a functionally equivalent bounded-memory path.
+//!
+//! Any replacement must preserve TMS retention or reconstruction, incremental
+//! JTAG execution, incremental TDO delivery, timeouts, disconnect aborts, and
+//! Core0/Core1 buffer-lifetime synchronization.
 
 mod stream;
 mod wire;
@@ -165,6 +172,9 @@ impl XvcServer {
                     bit_count,
                     consumed,
                 } => {
+                    // COMPATIBILITY INVARIANT: Vivado may ignore `getinfo:`.
+                    // Never reject this solely because it exceeds the buffered
+                    // path; dispatch it to the bounded streaming implementation.
                     self.receive.consume(consumed);
                     if let Err(error) = stream::execute(
                         bit_count,

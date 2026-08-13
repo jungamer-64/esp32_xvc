@@ -1,4 +1,12 @@
 //! Bounded-memory large-shift execution required for Vivado compatibility.
+//!
+//! # CRITICAL: THIS IS NOT AN OPTIONAL OPTIMIZATION
+//!
+//! Vivado may send shifts larger than the limit advertised by `getinfo:`. Do
+//! not delete this module, route every shift through the fixed receive buffer,
+//! or reject all shifts above `BUFFERED_SHIFT_MAX_BITS`. Any replacement must
+//! provide equivalent bounded-memory, two-pass TMS/TDI processing and preserve
+//! incremental TDO delivery plus Core0/Core1 cancellation safety.
 
 use alloc::vec::Vec;
 
@@ -361,6 +369,9 @@ pub(super) fn execute(
     clock: &Clock,
     workspace: &mut StreamWorkspace,
 ) -> Result<(), StreamError> {
+    // This upper bound protects memory and execution time; it is not the
+    // advertised buffered limit. Requests between those limits must continue
+    // through this streaming path for Vivado compatibility.
     if bit_count > ABSOLUTE_MAX_BITS {
         println!(
             "Shift too large: {} bits (max {})",
