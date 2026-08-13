@@ -8,21 +8,12 @@ use esp_hal::{
     interrupt::software::SoftwareInterruptControl,
     peripherals::{CPU_CTRL, GPIO18, GPIO19, GPIO23, GPIO34, SW_INTERRUPT},
     system::Stack,
-    time::{Duration, Instant},
 };
 use esp_println::println;
 use static_cell::ConstStaticCell;
 
-use crate::{
-    logging::xvc_log,
-    runtime::{self, Clock},
-};
-
 pub(crate) const MIN_TCK_PERIOD_US: u32 = 1;
 pub(crate) const MAX_TCK_PERIOD_US: u32 = 1_000;
-
-const RESET_TIMEOUT_MS: i64 = 2_000;
-const HARD_TIMEOUT_GRACE_MS: i64 = 2_000;
 
 pub(crate) const fn bytes_for_bits(bit_count: usize) -> usize {
     bit_count.div_ceil(8)
@@ -167,121 +158,6 @@ impl JtagService {
         self.tck_period_us.saturating_mul(1_000)
     }
 
-    pub(crate) fn reset<F>(&mut self, clock: &Clock, mut poll: F) -> Result<(), JtagError>
-    where
-        F: FnMut() -> bool,
-    {
-        let command = ipc::publish_reset(self.tck_period_us).map_err(map_publish_error)?;
-        let soft_deadline = clock.now_ms().saturating_add(RESET_TIMEOUT_MS);
-        let hard_deadline = soft_deadline.saturating_add(HARD_TIMEOUT_GRACE_MS);
-        let mut soft_timeout = false;
-
-        while !command.is_complete() {
-            if !poll() {
-                ipc::request_abort();
-            }
-
-            let now = clock.now_ms();
-            if now > soft_deadline && !soft_timeout {
-                xvc_log!("Reset timeout, aborting");
-                ipc::request_abort();
-                soft_timeout = true;
-            }
-            if now > hard_deadline {
-                println!("CRITICAL: Core1 stuck (RESET)");
-                runtime::reset();
-            }
-            runtime::yield_now();
-        }
-
-        if command.succeeded() {
-            Ok(())
-        } else {
-            Err(JtagError::WorkerFailed)
-        }
-    }
-
-    pub(crate) fn shift<F>(&mut self, shift: JtagShift<'_>, mut poll: F) -> Result<(), JtagError>
-    where
-        F: FnMut() -> bool,
-    {
-        let command = ipc::publish_shift(
-            self.tck_period_us,
-            shift.bit_count,
-            shift.tms.as_ptr(),
-            shift.tdi.as_ptr(),
-            shift.tdo.as_mut_ptr(),
-        )
-        .map_err(map_publish_error)?;
-
-        let expected_ms = (shift.bit_count as u64)
-            .saturating_mul(self.tck_period_us as u64)
-            .div_ceil(1_000);
-        let soft_deadline = Instant::now()
-            + Duration::from_millis(
-                expected_ms
-                    .saturating_mul(shift.execution.timeout_multiplier())
-                    .saturating_add(200),
-            );
-        let hard_deadline = soft_deadline + Duration::from_millis(HARD_TIMEOUT_GRACE_MS as u64);
-        let mut soft_timeout = false;
-
-        while !command.is_complete() {
-            if !poll() {
-                ipc::request_abort();
-            }
-
-            let now = Instant::now();
-            if now > soft_deadline && !soft_timeout {
-                xvc_log!("Core1 timeout ({} bits)", shift.bit_count);
-                ipc::request_abort();
-                soft_timeout = true;
-            }
-            if now > hard_deadline {
-                println!("CRITICAL: Core1 stuck (SHIFT)");
-                runtime::reset();
-            }
-            runtime::yield_now();
-        }
-
-        if !command.succeeded() {
-            return Err(JtagError::WorkerFailed);
-        }
-
-        if !shift.bit_count.is_multiple_of(8) {
-            let final_byte = shift.tdo.len() - 1;
-            shift.tdo[final_byte] &= (1 << (shift.bit_count % 8)) - 1;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn abort_and_wait(&self, clock: &Clock) {
-        let Some(sequence) = ipc::active_sequence() else {
-            return;
-        };
-
-        xvc_log!("Waiting for Core1 (seq={})...", sequence);
-        ipc::request_abort();
-        let deadline = clock.now_ms().saturating_add(HARD_TIMEOUT_GRACE_MS);
-        while !ipc::sequence_completed(sequence) {
-            if clock.now_ms() > deadline {
-                println!("CRITICAL: Core1 stuck while aborting");
-                runtime::reset();
-            }
-            runtime::yield_now();
-        }
-        ipc::clear_abort();
-    }
-}
-
-fn map_publish_error(error: ipc::PublishError) -> JtagError {
-    match error {
-        ipc::PublishError::Busy => JtagError::Busy,
-        ipc::PublishError::WorkerCommandOccupied => {
-            println!("FATAL: Core1 command was not consumed");
-            runtime::reset()
-        }
-    }
 }
 
 fn configure_tdo_input() {

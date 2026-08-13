@@ -700,7 +700,6 @@ dependencies = [
  "esp-println",
  "esp-radio",
  "esp-rtos",
- "smoltcp",
  "static_cell",
 ]
 
