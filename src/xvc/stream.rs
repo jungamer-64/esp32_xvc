@@ -333,14 +333,14 @@ pub(super) async fn execute(
 
         if let Some(previous) = pending {
             debug_assert!(previous.slot == fill_slot.other());
-            let alive = Cell::new(socket.may_recv() && socket.may_send());
+            let alive = Cell::new(socket.may_recv() || socket.may_send());
             let shift_future = jtag.shift(shift, || alive.get());
             let send_future = send_with_liveness(socket, &previous_tdo[..previous.length], &alive);
             let (shift_result, send_result) = join(shift_future, send_future).await;
             send_result?;
             shift_result.map_err(|_| StreamError::JtagFailed)?;
         } else {
-            jtag.shift(shift, || socket.may_recv() && socket.may_send())
+            jtag.shift(shift, || socket.may_recv() || socket.may_send())
                 .await
                 .map_err(|_| StreamError::JtagFailed)?;
         }
@@ -367,11 +367,10 @@ pub(super) async fn execute(
     }
 
     let elapsed_ms = started_at.elapsed().as_millis();
-    let bits_per_second = if elapsed_ms > 0 {
-        (bit_count as u64).saturating_mul(1_000) / elapsed_ms
-    } else {
-        0
-    };
+    let bits_per_second = (bit_count as u64)
+        .saturating_mul(1_000)
+        .checked_div(elapsed_ms)
+        .unwrap_or(0);
     xvc_log!(
         "Stream complete: {bit_count} bits in {elapsed_ms}ms ({} kbit/s, TCK={}ns)",
         bits_per_second / 1_000,

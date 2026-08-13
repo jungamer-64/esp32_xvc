@@ -1,0 +1,27 @@
+name: ESP32
+
+on:
+  push:
+  pull_request:
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: esp-rs/xtensa-toolchain@v1.7
+        with:
+          default: true
+          buildtargets: esp32
+          ldproxy: false
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Check
+        run: cargo check --locked
+      - name: Clippy
+        run: cargo clippy --locked --all-features -- -D warnings
+      - name: Release build
+        run: cargo build --release --locked

@@ -14,14 +14,19 @@ It exposes the ESP32 JTAG pins over TCP port 2542 through Wi-Fi.
 ## Architecture
 
 - `main` is only the firmware entrypoint; `app` composes the subsystems.
-- `config`, `runtime`, and `logging` own external configuration and platform
-  services.
-- `network` owns the Wi-Fi recovery state machine, smoltcp interface, and TCP
-  socket.
+- `config` and `logging` own external configuration and diagnostics.
+- `network` owns the async Wi-Fi recovery task and the fixed-IPv4
+  `embassy-net` stack. XVC owns the only TCP socket.
 - `jtag` exclusively owns the pins, Core1 worker, atomic mailbox, and unsafe
-  pointer boundary.
-- `xvc` owns the TCP session, wire decoder, buffered commands, and mandatory
-  bounded-memory large-shift streaming.
+  pointer boundary. Sequence-tagged completion signals and an in-flight guard
+  keep borrowed buffers unavailable until Core1 finishes or acknowledges an
+  abort, including when an async operation is cancelled.
+- `xvc` owns the async TCP session, wire decoder, buffered commands, explicit
+  progress timeouts, and mandatory bounded-memory large-shift streaming.
+
+Core0 runs Embassy on `esp-rtos`; Core1 remains dedicated to JTAG bit-banging.
+The firmware uses `esp-radio` only through its async Wi-Fi interface and has no
+direct `smoltcp` integration or synchronous compatibility path.
 
 XVC code invokes JTAG through validated `reset` and `shift` operations; it does
 not access GPIO registers or the Core1 mailbox directly.
@@ -72,8 +77,8 @@ real Wi-Fi credentials.
 ## Build and flash
 
 ```powershell
-cargo check
-cargo build --release
+cargo check --locked
+cargo build --release --locked
 cargo run --release
 ```
 

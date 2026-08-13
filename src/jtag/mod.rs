@@ -212,13 +212,14 @@ where
     F: FnMut() -> bool,
 {
     let soft_deadline = Instant::now() + soft_timeout;
-    let hard_deadline = soft_deadline + HARD_TIMEOUT_GRACE;
+    let mut hard_deadline = soft_deadline + HARD_TIMEOUT_GRACE;
     let mut abort_requested = false;
 
     while !command.is_complete() {
         if !is_alive() && !abort_requested {
             ipc::request_abort();
             abort_requested = true;
+            hard_deadline = (Instant::now() + HARD_TIMEOUT_GRACE).min(hard_deadline);
         }
 
         let now = Instant::now();

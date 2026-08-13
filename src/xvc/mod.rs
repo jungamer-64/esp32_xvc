@@ -86,7 +86,7 @@ impl XvcServer {
             }
 
             xvc_log!("New client, TAP reset");
-            let reset_result = jtag.reset(|| socket.may_recv() && socket.may_send()).await;
+            let reset_result = jtag.reset(|| socket.may_recv() || socket.may_send()).await;
             if let Err(error) = reset_result {
                 println!("TAP reset failed: {error:?}");
                 abort_socket(&mut socket).await;
@@ -150,7 +150,7 @@ impl XvcServer {
                             shift.tdi,
                             output,
                         )?;
-                        jtag.shift(request, || socket.may_recv() && socket.may_send())
+                        jtag.shift(request, || socket.may_recv() || socket.may_send())
                             .await?;
 
                         #[cfg(feature = "xvc-log")]
