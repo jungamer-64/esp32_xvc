@@ -11,13 +11,18 @@ mod config;
 mod jtag;
 mod logging;
 mod network;
-mod runtime;
 mod xvc;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-#[esp_hal::main]
-fn main() -> ! {
+#[esp_rtos::main]
+async fn main(spawner: embassy_executor::Spawner) -> ! {
     let hal_config = esp_hal::Config::default().with_cpu_clock(esp_hal::clock::CpuClock::max());
-    app::run(esp_hal::init(hal_config))
+    app::run(spawner, esp_hal::init(hal_config)).await
+}
+
+#[panic_handler]
+fn panic(info: &core::panic::PanicInfo<'_>) -> ! {
+    esp_println::println!("panic: {info}");
+    esp_hal::system::software_reset()
 }

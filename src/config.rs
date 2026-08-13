@@ -1,10 +1,5 @@
 //! Compile-time firmware configuration boundary.
 
-#[cfg(not(feature = "esp32"))]
-compile_error!(
-    "This firmware uses original ESP32 register addresses and cannot target another chip"
-);
-
 #[derive(Clone, Copy)]
 pub(crate) struct Ipv4Address([u8; 4]);
 

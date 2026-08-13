@@ -1,36 +1,38 @@
 //! Firmware composition root.
 
-use esp_hal::{peripherals::Peripherals, timer::timg::TimerGroup};
+use embassy_executor::Spawner;
+use esp_hal::{
+    interrupt::software::SoftwareInterruptControl, peripherals::Peripherals, ram,
+    timer::timg::TimerGroup,
+};
 use esp_println::println;
 
 use crate::{
     config,
     jtag::{JtagHardware, JtagService},
-    network::Network,
-    runtime::{self, Clock},
     xvc::XvcServer,
 };
 
-pub(crate) fn run(peripherals: Peripherals) -> ! {
+pub(crate) async fn run(spawner: Spawner, peripherals: Peripherals) -> ! {
     println!("ESP32 XVC Server v1.2 (Stable)");
-    runtime::init_heap();
-    let clock = Clock::start();
+    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1_024);
+    esp_alloc::heap_allocator!(size: 32 * 1_024);
 
     let timer_group = TimerGroup::new(peripherals.TIMG0);
-    esp_rtos::start(timer_group.timer0);
+    let software_interrupts = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(timer_group.timer0, software_interrupts.software_interrupt0);
 
-    let mut jtag = JtagService::start(JtagHardware {
+    let jtag = JtagService::start(JtagHardware {
         tck: peripherals.GPIO18,
         tms: peripherals.GPIO23,
         tdi: peripherals.GPIO19,
         tdo: peripherals.GPIO34,
         cpu_control: peripherals.CPU_CTRL,
-        software_interrupt: peripherals.SW_INTERRUPT,
+        software_interrupt: software_interrupts.software_interrupt1,
     });
     println!("JTAG: TCK=18, TMS=23, TDI=19, TDO=34");
 
-    let radio = esp_radio::init().expect("esp-radio failed");
-    let mut network = Network::connect(&radio, peripherals.WIFI, config::NETWORK, &clock);
+    let stack = crate::network::start(spawner, peripherals.WIFI, config::NETWORK).await;
     let server = XvcServer::new();
-    server.run(config::NETWORK, &mut network, &mut jtag, &clock)
+    server.run(stack, jtag).await
 }
