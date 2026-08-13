@@ -35,7 +35,23 @@ pub(crate) enum JtagError {
     InvalidShiftBuffers,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShiftExecution {
+    BufferedCommand,
+    StreamChunk,
+}
+
+impl ShiftExecution {
+    const fn timeout_multiplier(self) -> u64 {
+        match self {
+            Self::BufferedCommand => 2,
+            Self::StreamChunk => 3,
+        }
+    }
+}
+
 pub(crate) struct JtagShift<'a> {
+    execution: ShiftExecution,
     bit_count: usize,
     tms: &'a [u8],
     tdi: &'a [u8],
@@ -44,6 +60,7 @@ pub(crate) struct JtagShift<'a> {
 
 impl<'a> JtagShift<'a> {
     pub(crate) fn new(
+        execution: ShiftExecution,
         bit_count: usize,
         tms: &'a [u8],
         tdi: &'a [u8],
@@ -59,6 +76,7 @@ impl<'a> JtagShift<'a> {
         }
 
         Ok(Self {
+            execution,
             bit_count,
             tms,
             tdi,
@@ -200,7 +218,11 @@ impl JtagService {
             .saturating_mul(self.tck_period_us as u64)
             .div_ceil(1_000);
         let soft_deadline = Instant::now()
-            + Duration::from_millis(expected_ms.saturating_mul(3).saturating_add(200));
+            + Duration::from_millis(
+                expected_ms
+                    .saturating_mul(shift.execution.timeout_multiplier())
+                    .saturating_add(200),
+            );
         let hard_deadline = soft_deadline + Duration::from_millis(HARD_TIMEOUT_GRACE_MS as u64);
         let mut soft_timeout = false;
 

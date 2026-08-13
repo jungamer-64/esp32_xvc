@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use esp_println::println;
 
 use crate::{
-    jtag::{JtagService, JtagShift, bytes_for_bits},
+    jtag::{JtagService, JtagShift, ShiftExecution, bytes_for_bits},
     logging::xvc_log,
     network::Network,
     runtime::{self, Clock},
@@ -456,6 +456,7 @@ pub(super) fn execute(
         let (current_tdo, other_tdo) = split_tdo_buffers(&mut workspace.tdo_buffers, fill_slot);
         let mut polling_error = None;
         let shift = JtagShift::new(
+            ShiftExecution::StreamChunk,
             chunk_bits,
             &workspace.tms_chunk[..chunk_bytes],
             &workspace.tdi_chunk[..chunk_bytes],

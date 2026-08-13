@@ -3,6 +3,21 @@
 Bare-metal Xilinx Virtual Cable (XVC) server for the original dual-core ESP32.
 It exposes the ESP32 JTAG pins over TCP port 2542 through Wi-Fi.
 
+## Architecture
+
+- `main` is only the firmware entrypoint; `app` composes the subsystems.
+- `config`, `runtime`, and `logging` own external configuration and platform
+  services.
+- `network` owns the Wi-Fi recovery state machine, smoltcp interface, and TCP
+  socket.
+- `jtag` exclusively owns the pins, Core1 worker, atomic mailbox, and unsafe
+  pointer boundary.
+- `xvc` owns the TCP session, wire decoder, buffered commands, and mandatory
+  bounded-memory large-shift streaming.
+
+XVC code invokes JTAG through validated `reset` and `shift` operations; it does
+not access GPIO registers or the Core1 mailbox directly.
+
 ## Hardware
 
 The firmware is intentionally specific to the original Xtensa ESP32 and uses
@@ -59,6 +74,13 @@ cargo run --release
 
 ```powershell
 cargo run --release --features xvc-log
+```
+
+The verbose TDO register diagnostic is disabled during normal startup. Enable
+it explicitly when diagnosing the GPIO34 input path:
+
+```powershell
+cargo run --release --features tdo-diagnostic
 ```
 
 After the firmware reports that the server is ready, connect Vivado to

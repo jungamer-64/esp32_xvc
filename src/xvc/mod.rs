@@ -12,7 +12,10 @@ use static_cell::{ConstStaticCell, StaticCell};
 
 use crate::{
     config::NetworkConfig,
-    jtag::{JtagService, JtagShift, MAX_TCK_PERIOD_US, MIN_TCK_PERIOD_US, bytes_for_bits},
+    jtag::{
+        JtagService, JtagShift, MAX_TCK_PERIOD_US, MIN_TCK_PERIOD_US, ShiftExecution,
+        bytes_for_bits,
+    },
     logging::xvc_log,
     network::{ConnectionState, LinkEvent, Network},
     runtime::{self, Clock},
@@ -190,14 +193,19 @@ impl XvcServer {
                     wire::Command::Shift(shift) => {
                         let byte_count = bytes_for_bits(shift.bit_count);
                         let output = self.response.output(byte_count);
-                        let request =
-                            match JtagShift::new(shift.bit_count, shift.tms, shift.tdi, output) {
-                                Ok(request) => request,
-                                Err(error) => {
-                                    println!("Invalid JTAG shift: {:?}", error);
-                                    return ProcessResult::Abort;
-                                }
-                            };
+                        let request = match JtagShift::new(
+                            ShiftExecution::BufferedCommand,
+                            shift.bit_count,
+                            shift.tms,
+                            shift.tdi,
+                            output,
+                        ) {
+                            Ok(request) => request,
+                            Err(error) => {
+                                println!("Invalid JTAG shift: {:?}", error);
+                                return ProcessResult::Abort;
+                            }
+                        };
                         if let Err(error) = jtag.shift(request, || {
                             network.poll(clock);
                             network.connection_alive()
