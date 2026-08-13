@@ -6,7 +6,7 @@ publish = false
 
 [[bin]]
 name = "esp32-xvc-server"
-path = "src/esp32_xvc_server.rs"
+path = "src/main.rs"
 test = false
 bench = false
 
